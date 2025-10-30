@@ -168,10 +168,10 @@ class PyTorchLSTMValidator(LSTMValidator):
                 y_val = np.expand_dims(y_val, -1)
 
             # Convert to tensors
-            X_train = torch.tensor(X_train, dtype=torch.float32).to(DEVICE)
-            y_train = torch.tensor(y_train, dtype=torch.float32).to(DEVICE)
-            X_val = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
-            y_val = torch.tensor(y_val, dtype=torch.float32).to(DEVICE)
+            X_train = torch.tensor(X_train, dtype=torch.float32)
+            y_train = torch.tensor(y_train, dtype=torch.float32)
+            X_val = torch.tensor(X_val, dtype=torch.float32)
+            y_val = torch.tensor(y_val, dtype=torch.float32)
 
             # Create data loaders
             train_dataset = TensorDataset(X_train, y_train)
@@ -250,6 +250,8 @@ class PyTorchLSTMValidator(LSTMValidator):
             batches_seen = 0
 
             for batch_idx, (X_batch, y_batch) in enumerate(train_loader, start=1):
+                X_batch = X_batch.to(DEVICE, non_blocking=train_loader.pin_memory)
+                y_batch = y_batch.to(DEVICE, non_blocking=train_loader.pin_memory)
                 optimizer.zero_grad()
                 outputs = model(X_batch)
                 loss = criterion(outputs, y_batch)
@@ -268,6 +270,8 @@ class PyTorchLSTMValidator(LSTMValidator):
             val_errors = []
             with torch.no_grad():
                 for v_idx, (X_batch, y_batch) in enumerate(val_loader, start=1):
+                    X_batch = X_batch.to(DEVICE, non_blocking=val_loader.pin_memory)
+                    y_batch = y_batch.to(DEVICE, non_blocking=val_loader.pin_memory)
                     outputs = model(X_batch)
                     loss = criterion(outputs, y_batch)
                     val_losses.append(loss.item())

@@ -1,7 +1,7 @@
 # Data Source Configuration
 data_source:
   type: csv
-  path: /Users/jack/Projects/lstm/forecasting/data/raw/gold_1minute.csv
+  path: ./data/gold_1minute.csv
   target_column: close
 
 # Data splitting ratios
