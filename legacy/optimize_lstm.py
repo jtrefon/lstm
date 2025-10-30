@@ -25,9 +25,9 @@ def default_grid_from_config(cfg: LSTMConfig) -> Dict[str, List[Any]]:
     seqs = [64, 128, 256]
     lrs = [5e-5, 1e-4, 2e-4, 3e-4, 5e-4, 8e-4]
     bsz = [64, 128, 256]
-    units = [256, 512, 768, 1024, 1536]
-    layers = [2, 3, 4, 5, 6]
-    drop = [0.1, 0.02, 0.003, 0.0005]
+    units = [256, 512, 768]
+    layers = [2, 3, 4]
+    drop = [0.1, 0.2, 0.3]
     return {
         'sequence_length': seqs,
         'learning_rate': lrs,

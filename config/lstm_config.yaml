@@ -1,0 +1,25 @@
+# LSTM Model & Training Configuration
+model:
+  input_size: 1
+  sequence_stride: 1
+
+training:
+  max_epochs: 500
+  early_stop_patience: 10
+  log_interval_batches: 200
+  log_interval_seconds: 30.0
+  max_batches_per_epoch: null  # null = no cap
+
+learning_rate_scheduler:
+  factor: 0.5
+  patience: 5
+  min_lr: 1e-6
+
+# Optimization windows for grid search (use smaller windows for faster iteration)
+optimization:
+  train_window: 10000
+  val_window: 1000
+
+# Forecasting
+forecast:
+  plot_max_points: 500

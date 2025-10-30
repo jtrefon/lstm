@@ -11,7 +11,7 @@ class DataLoader:
     # FILE_PATH: str = "path/to/your/data.csv"  # Pre-defined path to CSV file
     FILE_PATH: str = "/Users/jack/Projects/lstm/forecasting/data/raw/gold_1minute.csv"  # Pre-defined path to CSV file
     SELECTED_COLUMNS: List[str] = ['close']  # Columns to select
-    SPLIT_RATIOS: List[float] = [0.9, 0.05, 0.05]  # Train, validation, test ratios
+    SPLIT_RATIOS: List[float] = [0.95, 0.035, 0.015]  # Train, validation, test ratios
     
     def __init__(self):
         self._raw_data: pd.DataFrame = self._load_data()

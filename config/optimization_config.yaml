@@ -1,0 +1,28 @@
+# Grid Search Optimization Configuration
+grid_search:
+  # Hyperparameter search space
+  sequence_length: [64, 128, 256]
+  learning_rate: [5e-5, 1e-4, 2e-4, 3e-4, 5e-4, 8e-4]
+  batch_size: [64, 128, 256]
+  units: [256, 512, 768,1024,1280,1536,2048,2560,3072,3840,4096,5120,6144,7680,8192]
+  layers: [2, 3, 4,5,6]
+  dropout: [0.1, 0.02, 0.003,0.0005]
+  
+  # Maximum number of trials to run (null = run all combinations)
+  samples_cap: null
+
+  # Grid-search-only data cap (null = use all available samples)
+  # Use 'end' to take the most recent samples, or 'start' for earliest samples
+  data_samples_cap: 1000
+  data_cap_from: end
+
+# Persistence configuration
+persistence:
+  state_file: models/lstm_search_state.json
+  results_file: models/lstm_grid_results.csv
+  best_params_file: models/lstm_best_params.json
+
+# Logging
+logging:
+  verbose: true
+  save_interval: 1  # Save state after every N trials

@@ -1,0 +1,19 @@
+# Data Source Configuration
+data_source:
+  type: csv
+  path: /Users/jack/Projects/lstm/forecasting/data/raw/gold_1minute.csv
+  target_column: close
+
+# Data splitting ratios
+splitting:
+  train_ratio: 0.95
+  validation_ratio: 0.035
+  test_ratio: 0.015
+
+# Data preprocessing
+preprocessing:
+  selected_columns: [close]
+  handle_missing: forward_fill  # forward_fill, drop, interpolate
+  sort_by_index: true
+  outlier_method: detrended_iqr  # 'none', 'iqr', 'zscore', 'detrended_iqr' (preserves trend, removes anomalies)
+  outlier_threshold: 1.5  # IQR multiplier (1.5 = standard). Detrended IQR removes anomalies while preserving $100->$4k trend

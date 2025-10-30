@@ -296,7 +296,7 @@ class LSTMValidator:
             for batch_idx, (X_batch, y_batch) in enumerate(train_loader, start=1):
                 optimizer.zero_grad()
                 outputs = model(X_batch)
-                loss = criterion(outputs.squeeze(), y_batch)
+                loss = criterion(outputs, y_batch)
                 loss.backward()
                 optimizer.step()
 
@@ -337,9 +337,11 @@ class LSTMValidator:
             with torch.no_grad():
                 for v_idx, (X_batch, y_batch) in enumerate(val_loader, start=1):
                     outputs = model(X_batch)
-                    loss = criterion(outputs.squeeze(), y_batch)
+                    loss = criterion(outputs, y_batch)
                     val_losses.append(loss.item())
-                    val_errors.append(outputs.squeeze().cpu().numpy() - y_batch.cpu().numpy())
+                    preds = outputs.squeeze(-1).cpu().numpy()
+                    targets = y_batch.squeeze(-1).cpu().numpy()
+                    val_errors.append(preds - targets)
                     if self.config.max_batches_per_epoch is not None and v_idx >= self.config.max_batches_per_epoch:
                         break
 
