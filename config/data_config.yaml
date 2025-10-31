@@ -6,9 +6,9 @@ data_source:
 
 # Data splitting ratios
 splitting:
-  train_ratio: 0.95
-  validation_ratio: 0.035
-  test_ratio: 0.015
+  train_ratio: 0.98
+  validation_ratio: 0.018
+  test_ratio: 0.002
 
 # Data preprocessing
 preprocessing:

@@ -16,6 +16,20 @@ class DataSource(ABC):
         pass
 
 
+class ModelRepository(ABC):
+    """Port for persisting trained model artifacts."""
+
+    @abstractmethod
+    def save_model(self, state_dict: Dict[str, Any], path: str) -> None:
+        """Persist a model's state dict to the given path."""
+        pass
+
+    @abstractmethod
+    def save_scaler(self, scaler: Any, path: str) -> None:
+        """Persist a fitted scaler or preprocessor to the given path."""
+        pass
+
+
 class SeriesSplitter(ABC):
     """Port for splitting time series into train/val/test."""
 
@@ -49,6 +63,11 @@ class ParameterGridGenerator(ABC):
     @abstractmethod
     def generate(self) -> Iterable[ParameterSet]:
         """Generate parameter combinations."""
+        pass
+
+    @abstractmethod
+    def total(self) -> int:
+        """Return total number of parameter combinations."""
         pass
 
 

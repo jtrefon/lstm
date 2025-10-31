@@ -52,6 +52,21 @@ class LSTMConfig:
     lr_scheduler: LearningRateSchedulerConfig
     optimization: OptimizationWindowsConfig
     forecast: ForecastConfig
+    # Optional defaults for single-training when best_params/CLI not provided
+    model_defaults: "ModelDefaultsConfig | None" = None
+    # Control parameter precedence: True = config only, False = config > best_params.json
+    use_config_only: bool = False
+
+
+@dataclass(frozen=True)
+class ModelDefaultsConfig:
+    """Default per-trial hyperparameters for single training."""
+    sequence_length: int
+    learning_rate: float
+    batch_size: int
+    units: int
+    layers: int
+    dropout: float
 
 
 @dataclass(frozen=True)
@@ -177,12 +192,30 @@ class ConfigLoader:
             plot_max_points=int(fconf['plot_max_points']),
         )
 
+        # Optional model defaults for single-training
+        defaults_raw = data.get('model_defaults')
+        defaults = None
+        if defaults_raw is not None:
+            defaults = ModelDefaultsConfig(
+                sequence_length=int(defaults_raw['sequence_length']),
+                learning_rate=float(defaults_raw['learning_rate']),
+                batch_size=int(defaults_raw['batch_size']),
+                units=int(defaults_raw['units']),
+                layers=int(defaults_raw['layers']),
+                dropout=float(defaults_raw['dropout']),
+            )
+
+        # Optional flag to enforce config-only mode (ignore best_params.json)
+        use_config_only = bool(data.get('use_config_only', False))
+
         return LSTMConfig(
             model=model,
             training=training,
             lr_scheduler=lr_scheduler,
             optimization=optimization,
             forecast=forecast,
+            model_defaults=defaults,
+            use_config_only=use_config_only,
         )
 
     @staticmethod

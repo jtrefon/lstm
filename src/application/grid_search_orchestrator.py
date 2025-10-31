@@ -22,12 +22,42 @@ class GridSearchOrchestrator:
             best_loss = float('inf')
             completed_trials = 0
 
+            state_snapshot = self.service.state_repo.load()
+            completed_before_run = len(state_snapshot.get('completed', []))
+            total_permutations = self.service.grid_generator.total()
+            remaining_permutations = max(total_permutations - completed_before_run, 0)
+            planned_new_trials = (
+                remaining_permutations
+                if request.max_trials is None
+                else min(request.max_trials, remaining_permutations)
+            )
+            progress_denominator = (
+                completed_before_run + planned_new_trials
+                if planned_new_trials > 0
+                else (total_permutations or 1)
+            )
+
+            if request.verbose:
+                print(
+                    "Grid permutations: "
+                    f"total={total_permutations} "
+                    f"completed={completed_before_run} "
+                    f"remaining={remaining_permutations} "
+                    f"planned_this_run={planned_new_trials}"
+                )
+
             for result in self.service.run(samples_cap=request.max_trials):
                 completed_trials += 1
 
                 if request.verbose:
+                    global_completed = completed_before_run + completed_trials
+                    progress_pct = (global_completed / progress_denominator) * 100.0
+                    progress_summary = (
+                        f"{global_completed}/{progress_denominator} "
+                        f"({progress_pct:.1f}%)"
+                    )
                     print(
-                        f"[{result.trial_number}] "
+                        f"[{result.trial_number} | {progress_summary}] "
                         f"seq_len={result.parameters.sequence_length} "
                         f"lr={result.parameters.learning_rate:.6f} "
                         f"batch={result.parameters.batch_size} "

@@ -1,6 +1,7 @@
 """LSTM training loop - PyTorch-based implementation."""
 import time
 from typing import Tuple
+import copy
 
 import numpy as np
 import pandas as pd
@@ -14,6 +15,7 @@ from config.config_loader import LSTMConfig, TrainingConfig, LearningRateSchedul
 from domain.models import ParameterSet, ValidationMetrics
 from domain.ports import LSTMValidator, SequenceBuilder
 from infrastructure.data.outlier_handler import OutlierHandler
+from infrastructure.torch.FactoryPattern_LSTMModelFactory import build_lstm
 
 
 # Device selection
@@ -30,26 +32,6 @@ elif torch.backends.mps.is_available():
 else:
     DEVICE = torch.device('cpu')
     print(f"Using device: {DEVICE}")
-
-
-class LSTMModel(nn.Module):
-    """LSTM neural network for time series forecasting."""
-
-    def __init__(self, input_size: int = 1, hidden_size: int = 50, num_layers: int = 1, dropout: float = 0.0):
-        """Initialize LSTM model."""
-        super(LSTMModel, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, dropout=dropout, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass."""
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(DEVICE)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(DEVICE)
-        out, _ = self.lstm(x, (h0, c0))
-        out = self.fc(out[:, -1, :])
-        return out
 
 
 class PyTorchLSTMValidator(LSTMValidator):
@@ -79,9 +61,19 @@ class PyTorchLSTMValidator(LSTMValidator):
         self.lstm_config = lstm_config
         self.preprocessing_config = preprocessing_config
         self._log_preprocessing = log_preprocessing
+        self._last_model = None
+        self._scaler = None
+        self._prep_stats = {
+            'raw_len': int(len(self.train_series) + len(self.val_series)),
+            'na_removed': 0,
+            'outliers_clipped': 0,
+        }
+        self._seq_stats = {'train_sequences': 0, 'val_sequences': 0}
 
         # Preprocess once per run: sorting, missing handling, outlier handling, scaling
-        combined = pd.concat([self.train_series, self.val_series])
+        combined_raw = pd.concat([self.train_series, self.val_series])
+        na_before = int(combined_raw.isna().sum())
+        combined = combined_raw
         # Sort if requested
         if self.preprocessing_config and self.preprocessing_config.sort_by_index:
             combined = combined.sort_index()
@@ -102,26 +94,41 @@ class PyTorchLSTMValidator(LSTMValidator):
                 combined = combined.dropna()
         # Final guard: if any NaNs remain, drop them
         combined = combined.dropna()
+        self._prep_stats['na_removed'] = na_before  # everything removed by cleaning
         values = combined.values.flatten()
 
         if self.preprocessing_config and self.preprocessing_config.outlier_method != 'none':
+            if self._log_preprocessing:
+                print(f"Outlier handling: detecting anomalies with {self.preprocessing_config.outlier_method}...")
             values, n_clipped = OutlierHandler.handle_outliers(
                 values,
                 method=self.preprocessing_config.outlier_method,
                 threshold=self.preprocessing_config.outlier_threshold,
             )
+            self._prep_stats['outliers_clipped'] = int(n_clipped)
             if n_clipped > 0 and self._log_preprocessing:
                 print(
-                    f"Outlier handling: clipped {n_clipped} points using "
+                    f"  Clipped {n_clipped} points using "
                     f"{self.preprocessing_config.outlier_method} "
                     f"(threshold={self.preprocessing_config.outlier_threshold})"
                 )
 
+        # Final cleaned length after preprocessing/outlier handling
+        self._prep_stats['cleaned_len'] = int(len(values))
+
+        if self._log_preprocessing:
+            print(f"Scaling {len(values)} samples...")
         scaler = MinMaxScaler()
         scaled_all = scaler.fit_transform(values.reshape(-1, 1))
+        if self._log_preprocessing:
+            print(f"Scaling complete.")
+        self._scaler = scaler
         split = len(self.train_series)
         self._train_scaled = scaled_all[:split]
         self._val_scaled = scaled_all[split:]
+
+    def get_preprocessing_stats(self) -> dict:
+        return dict(self._prep_stats)
 
     def validate(self, parameters: ParameterSet) -> ValidationMetrics:
         """Validate LSTM with given parameters."""
@@ -133,6 +140,8 @@ class PyTorchLSTMValidator(LSTMValidator):
             val_scaled = self._val_scaled
 
             # Build sequences
+            if self._log_preprocessing:
+                print(f"Building sequences (seq_len={parameters.sequence_length}, stride={self.lstm_config.model.sequence_stride})...")
             X_train, y_train = self.sequence_builder.build(
                 train_scaled,
                 parameters.sequence_length,
@@ -143,6 +152,8 @@ class PyTorchLSTMValidator(LSTMValidator):
                 parameters.sequence_length,
                 stride=self.lstm_config.model.sequence_stride,
             )
+            if self._log_preprocessing:
+                print(f"Sequences built: train={len(X_train)} val={len(X_val)}")
 
             if len(X_train) == 0 or len(X_val) == 0:
                 if self._log_preprocessing:
@@ -156,6 +167,15 @@ class PyTorchLSTMValidator(LSTMValidator):
                     val_mae=float('inf'),
                     duration_seconds=time.time() - start_time,
                 )
+
+            # Track sequence counts for transparency
+            try:
+                self._seq_stats = {
+                    'train_sequences': int(len(X_train)),
+                    'val_sequences': int(len(X_val)),
+                }
+            except Exception:
+                self._seq_stats = {'train_sequences': 0, 'val_sequences': 0}
 
             # Ensure correct shapes: (batch, seq_len, 1) for inputs, (batch, 1) for targets
             if X_train.ndim == 2:
@@ -180,12 +200,8 @@ class PyTorchLSTMValidator(LSTMValidator):
             train_loader = DataLoader(train_dataset, batch_size=parameters.batch_size, shuffle=True, pin_memory=pin)
             val_loader = DataLoader(val_dataset, batch_size=parameters.batch_size, shuffle=False, pin_memory=pin)
 
-            # Create model
-            model = LSTMModel(
-                hidden_size=parameters.units,
-                num_layers=parameters.layers,
-                dropout=parameters.dropout,
-            ).to(DEVICE)
+            # Create model via factory (DRY, uses input_size from config)
+            model = build_lstm(self.lstm_config, parameters, DEVICE)
 
             # Training
             metrics = self._train_model(
@@ -202,6 +218,7 @@ class PyTorchLSTMValidator(LSTMValidator):
                 duration_seconds=float(time.time() - start_time),
             )
 
+            self._last_model = model
             return metrics
 
         except Exception as e:
@@ -215,9 +232,15 @@ class PyTorchLSTMValidator(LSTMValidator):
                 duration_seconds=time.time() - start_time,
             )
 
+    def get_last_model(self):
+        return self._last_model
+
+    def get_scaler(self):
+        return self._scaler
+
     def _train_model(
         self,
-        model: LSTMModel,
+        model: nn.Module,
         train_loader: DataLoader,
         val_loader: DataLoader,
         learning_rate: float,
@@ -237,6 +260,8 @@ class PyTorchLSTMValidator(LSTMValidator):
         best_val_rmse = float('inf')
         best_val_mae = float('inf')
         patience_counter = 0
+        best_state = None
+        best_epoch = -1
         
         # Ensure all are Python floats, not numpy types
         best_val_loss = float(best_val_loss)
@@ -294,23 +319,48 @@ class PyTorchLSTMValidator(LSTMValidator):
 
             # Ensure mean_val_loss is a Python float for scheduler
             mean_val_loss = float(mean_val_loss)
+            prev_lr = float(optimizer.param_groups[0]['lr'])
             scheduler.step(mean_val_loss)
+            new_lr = float(optimizer.param_groups[0]['lr'])
 
-            # Early stopping
             if mean_val_loss < best_val_loss:
                 best_val_loss = mean_val_loss
                 best_val_rmse = val_rmse
                 best_val_mae = val_mae
                 patience_counter = 0
+                try:
+                    best_state = copy.deepcopy(model.state_dict())
+                    best_epoch = epoch
+                except Exception:
+                    best_state = None
             else:
                 patience_counter += 1
                 if patience_counter >= self.lstm_config.training.early_stop_patience:
                     break
 
+            # Epoch summary logging
+            mean_train_loss = float(running_loss / batches_seen) if batches_seen else float('inf')
+            if self._log_preprocessing:
+                print(
+                    f"Epoch {epoch + 1:03d}: train_loss={mean_train_loss:.6f} | "
+                    f"val_loss={mean_val_loss:.6f} (rmse={val_rmse:.6f}, mae={val_mae:.6f}) | "
+                    f"lr={new_lr:.6f}{' (↓)' if new_lr < prev_lr else ''} | "
+                    f"patience={patience_counter}/{self.lstm_config.training.early_stop_patience}"
+                )
+
             model.train()
+
+        if best_state is not None:
+            try:
+                model.load_state_dict(best_state)
+            except Exception:
+                pass
 
         return {
             'val_loss': best_val_loss,
             'val_rmse': best_val_rmse,
             'val_mae': best_val_mae,
         }
+
+    def get_sequence_stats(self) -> dict:
+        return dict(self._seq_stats)

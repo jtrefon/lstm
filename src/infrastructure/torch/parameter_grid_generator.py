@@ -1,6 +1,8 @@
 """Parameter grid generator adapter."""
+from functools import reduce
 from itertools import product
-from typing import Iterable, List
+from operator import mul
+from typing import Iterable
 
 from config.config_loader import GridSearchConfig
 from domain.models import ParameterSet
@@ -33,3 +35,15 @@ class ConfigBasedParameterGridGenerator(ParameterGridGenerator):
                 layers=int(layers),
                 dropout=float(dropout),
             )
+
+    def total(self) -> int:
+        """Return total combinations available in the search grid."""
+        dimensions = (
+            len(self.grid_config.sequence_length),
+            len(self.grid_config.learning_rate),
+            len(self.grid_config.batch_size),
+            len(self.grid_config.units),
+            len(self.grid_config.layers),
+            len(self.grid_config.dropout),
+        )
+        return reduce(mul, dimensions, 1)

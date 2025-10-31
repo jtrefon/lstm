@@ -3,6 +3,19 @@ model:
   input_size: 1
   sequence_stride: 1
 
+model_defaults:
+  sequence_length: 60
+  learning_rate: 5e-5
+  batch_size: 128
+  units: 512
+  layers: 2
+  dropout: 0.0005
+
+# Parameter precedence mode
+# true = config-only (CLI > model_defaults, ignore best_params.json)
+# false = auto mode (CLI > model_defaults > best_params.json)
+use_config_only: true
+
 training:
   max_epochs: 500
   early_stop_patience: 10
@@ -11,8 +24,8 @@ training:
   max_batches_per_epoch: null  # null = no cap
 
 learning_rate_scheduler:
-  factor: 0.5
-  patience: 5
+  factor: 0.7
+  patience: 3
   min_lr: 1e-6
 
 # Optimization windows for grid search (use smaller windows for faster iteration)
