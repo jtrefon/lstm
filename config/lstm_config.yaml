@@ -5,11 +5,11 @@ model:
 
 model_defaults:
   sequence_length: 60
-  learning_rate: 5e-5
+  learning_rate: 0.00005
   batch_size: 128
   units: 512
   layers: 2
-  dropout: 0.0005
+  dropout: 0.0000001
 
 # Parameter precedence mode
 # true = config-only (CLI > model_defaults, ignore best_params.json)
