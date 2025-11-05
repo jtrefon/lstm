@@ -21,6 +21,8 @@ class TrainingConfig:
     log_interval_batches: int
     log_interval_seconds: float
     max_batches_per_epoch: Optional[int]
+    num_workers: Optional[int] = None
+    grad_clip_norm: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,8 @@ class LSTMConfig:
     model_defaults: "ModelDefaultsConfig | None" = None
     # Control parameter precedence: True = config only, False = config > best_params.json
     use_config_only: bool = False
+    # Optional reproducibility controls
+    reproducibility: "ReproducibilityConfig | None" = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,13 @@ class ModelDefaultsConfig:
     units: int
     layers: int
     dropout: float
+
+
+@dataclass(frozen=True)
+class ReproducibilityConfig:
+    """Reproducibility configuration (seeding and deterministic mode)."""
+    seed: Optional[int] = None
+    deterministic: bool = False
 
 
 @dataclass(frozen=True)
@@ -167,6 +178,12 @@ class ConfigLoader:
                 None if t['max_batches_per_epoch'] in (None, 'null')
                 else int(t['max_batches_per_epoch'])
             ),
+            num_workers=(
+                None if t.get('num_workers', None) in (None, 'null') else int(t.get('num_workers'))
+            ),
+            grad_clip_norm=(
+                None if t.get('grad_clip_norm', None) in (None, 'null') else float(t.get('grad_clip_norm'))
+            ),
         )
 
         # LR scheduler (ensure floats/ints) - fail fast if missing
@@ -208,6 +225,15 @@ class ConfigLoader:
         # Optional flag to enforce config-only mode (ignore best_params.json)
         use_config_only = bool(data.get('use_config_only', False))
 
+        # Optional reproducibility section
+        repro_raw = data.get('reproducibility')
+        reproducibility = None
+        if isinstance(repro_raw, dict):
+            reproducibility = ReproducibilityConfig(
+                seed=(None if repro_raw.get('seed', None) in (None, 'null') else int(repro_raw.get('seed'))),
+                deterministic=bool(repro_raw.get('deterministic', False)),
+            )
+
         return LSTMConfig(
             model=model,
             training=training,
@@ -216,6 +242,7 @@ class ConfigLoader:
             forecast=forecast,
             model_defaults=defaults,
             use_config_only=use_config_only,
+            reproducibility=reproducibility,
         )
 
     @staticmethod

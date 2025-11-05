@@ -25,7 +25,7 @@ class TorchModelRepository(ModelRepository):
 class ModelPackageRepository:
     def _hash_params(self, params: ParameterSet) -> str:
         raw = json.dumps(params.to_dict(), sort_keys=True).encode()
-        return hashlib.sha1(raw).hexdigest()[:10]
+        return hashlib.sha256(raw).hexdigest()[:16]
 
     def _signature(self, params: ParameterSet, val_loss: Optional[float]) -> str:
         h = self._hash_params(params)

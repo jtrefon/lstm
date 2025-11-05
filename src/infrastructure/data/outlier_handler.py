@@ -123,7 +123,7 @@ class OutlierHandler:
         std = np.std(data)
 
         if std == 0:
-            return data
+            return data, 0
 
         z_scores = np.abs((data - mean) / std)
         outlier_mask = z_scores > threshold

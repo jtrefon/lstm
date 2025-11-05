@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import logging
 from typing import Optional
 
 # Add src to path
@@ -14,11 +15,6 @@ from infrastructure.data.sequence_builder import NumpySequenceBuilder
 from infrastructure.persistence.best_params_repository import JSONBestParamsRepository
 from infrastructure.torch.lstm_trainer import PyTorchLSTMValidator
 from infrastructure.persistence.model_repository import TorchModelRepository, ModelPackageRepository
-
-
-def get_config_path(filename: str) -> str:
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(base_dir, 'config', filename)
 
 
 def resolve_default_artifacts(best_params_path: str) -> tuple[str, str]:
@@ -117,10 +113,16 @@ def main() -> None:
     p.add_argument('--verbose', action='store_true', default=True)
     args = p.parse_args()
 
+    logging.basicConfig(
+        level=(logging.INFO if args.verbose else logging.WARNING),
+        format='%(asctime)s %(levelname)s %(name)s - %(message)s',
+    )
+    logger = logging.getLogger(__name__)
+
     # Load configs
-    lstm_config = ConfigLoader.load_lstm_config(get_config_path('lstm_config.yaml'))
-    optimization_config = ConfigLoader.load_optimization_config(get_config_path('optimization_config.yaml'))
-    data_config = ConfigLoader.load_data_config(get_config_path('data_config.yaml'))
+    lstm_config = ConfigLoader.load_lstm_config(ConfigLoader.get_config_path('lstm_config.yaml'))
+    optimization_config = ConfigLoader.load_optimization_config(ConfigLoader.get_config_path('optimization_config.yaml'))
+    data_config = ConfigLoader.load_data_config(ConfigLoader.get_config_path('data_config.yaml'))
 
     # Data loading
     data_source = CSVDataSource(
@@ -129,7 +131,7 @@ def main() -> None:
     )
     df = data_source.load()
     series = df[data_config.data_source.target_column]
-    print(f"Loaded {len(series)} samples from data source")
+    logger.info(f"Loaded {len(series)} samples from data source")
 
     # Splitting: use full dataset with train/val ratios (optimization windows are for grid search only)
     splitter = TimeSeriesSplitter(
@@ -138,7 +140,7 @@ def main() -> None:
         test_ratio=data_config.splitting.test_ratio,
     )
     train_series, val_series, _ = splitter.split(series)
-    print(f"Split sizes → train={len(train_series)} val={len(val_series)}")
+    logger.info(f"Split sizes → train={len(train_series)} val={len(val_series)}")
 
     # Validator
     sequence_builder = NumpySequenceBuilder()
@@ -154,11 +156,6 @@ def main() -> None:
     # Parameters
     best_repo = JSONBestParamsRepository(optimization_config.persistence.best_params_file)
     params, source = choose_parameters(best_repo, args, lstm_config)
-    if params.layers <= 1 and params.dropout > 0.0:
-        raise SystemExit(
-            f"Invalid configuration: dropout ({params.dropout}) > 0 requires layers > 1. "
-            f"Parameter source: {source}. Adjust 'layers' or set 'dropout: 0.0'."
-        )
 
     # Train
     metrics = validator.validate(params)
@@ -195,35 +192,35 @@ def main() -> None:
     prep = validator.get_preprocessing_stats()
     seqs = validator.get_sequence_stats()
 
-    print("\n" + "=" * 80)
-    print("TRAINING COMPLETE")
-    print("=" * 80)
+    logger.info("\n" + "=" * 80)
+    logger.info("TRAINING COMPLETE")
+    logger.info("=" * 80)
     if saved_package_dir:
-        print(f"Saved package: {saved_package_dir}")
+        logger.info(f"Saved package: {saved_package_dir}")
     if args.model_out:
-        print(f"Saved model:   {args.model_out}")
+        logger.info(f"Saved model:   {args.model_out}")
     if args.scaler_out:
-        print(f"Saved scaler:  {args.scaler_out}")
-    print(f"Parameter source: {source}")
-    print("Parameters:")
-    print(f"  sequence_length: {params.sequence_length}")
-    print(f"  learning_rate:  {params.learning_rate}")
-    print(f"  batch_size:     {params.batch_size}")
-    print(f"  units:          {params.units}")
-    print(f"  layers:         {params.layers}")
-    print(f"  dropout:        {params.dropout}")
-    print("Data/Preprocessing:")
-    print(f"  raw_len:        {prep.get('raw_len', 0)}")
-    print(f"  cleaned_len:    {prep.get('cleaned_len', 0)}")
-    print(f"  na_removed:     {prep.get('na_removed', 0)}")
-    print(f"  outliers_clipped: {prep.get('outliers_clipped', 0)}")
-    print("Sequences:")
-    print(f"  train_sequences: {seqs.get('train_sequences', 0)}")
-    print(f"  val_sequences:   {seqs.get('val_sequences', 0)}")
-    print("Validation metrics:")
-    print(f"  val_loss:       {metrics.val_loss:.6f}")
-    print(f"  val_rmse:       {metrics.val_rmse:.6f}")
-    print(f"  val_mae:        {metrics.val_mae:.6f}")
+        logger.info(f"Saved scaler:  {args.scaler_out}")
+    logger.info(f"Parameter source: {source}")
+    logger.info("Parameters:")
+    logger.info(f"  sequence_length: {params.sequence_length}")
+    logger.info(f"  learning_rate:  {params.learning_rate}")
+    logger.info(f"  batch_size:     {params.batch_size}")
+    logger.info(f"  units:          {params.units}")
+    logger.info(f"  layers:         {params.layers}")
+    logger.info(f"  dropout:        {params.dropout}")
+    logger.info("Data/Preprocessing:")
+    logger.info(f"  raw_len:        {prep.get('raw_len', 0)}")
+    logger.info(f"  cleaned_len:    {prep.get('cleaned_len', 0)}")
+    logger.info(f"  na_removed:     {prep.get('na_removed', 0)}")
+    logger.info(f"  outliers_clipped: {prep.get('outliers_clipped', 0)}")
+    logger.info("Sequences:")
+    logger.info(f"  train_sequences: {seqs.get('train_sequences', 0)}")
+    logger.info(f"  val_sequences:   {seqs.get('val_sequences', 0)}")
+    logger.info("Validation metrics:")
+    logger.info(f"  val_loss:       {metrics.val_loss:.6f}")
+    logger.info(f"  val_rmse:       {metrics.val_rmse:.6f}")
+    logger.info(f"  val_mae:        {metrics.val_mae:.6f}")
 
 
 if __name__ == '__main__':

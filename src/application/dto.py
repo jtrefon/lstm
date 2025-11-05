@@ -15,6 +15,6 @@ class GridSearchRequest:
 @dataclass
 class GridSearchResponse:
     """Response from grid search."""
-    summary: SearchSummary
+    summary: Optional[SearchSummary]
     success: bool
     error_message: Optional[str] = None

@@ -1,5 +1,6 @@
 import argparse
 import csv
+import logging
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -11,6 +12,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.config_loader import ConfigLoader
+
+logger = logging.getLogger(__name__)
 
 
 def _project_root() -> Path:
@@ -107,9 +110,9 @@ def _suggest_prune(all_rows: List[Dict[str, str]], top_rows: List[Dict[str, str]
 
 
 def _print_distribution(title: str, counts: Counter, means: Dict[float, float]) -> None:
-    print(title)
+    logger.info(title)
     for v, c in counts.most_common():
-        print(f"  {v:g}: count={c} mean_loss={means.get(v, float('nan')):.6f}")
+        logger.info(f"  {v:g}: count={c} mean_loss={means.get(v, float('nan')):.6f}")
 
 
 def main() -> None:
@@ -119,47 +122,52 @@ def main() -> None:
     p.add_argument('--top-coverage', type=float, default=0.8)
     args = p.parse_args()
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(name)s - %(message)s',
+    )
+
     path = _resolve_results_path(args.results)
     if not path.exists():
-        print(f"Missing results file: {path}")
+        logger.error(f"Missing results file: {path}")
         return
 
     rows = _read_rows(path)
     if not rows:
-        print('No rows found')
+        logger.warning('No rows found')
         return
 
     sorted_rows = _sort_by_loss(rows)
     top_rows = sorted_rows[: args.top]
 
-    print('Top trials:')
+    logger.info('Top trials:')
     for i, r in enumerate(top_rows, 1):
         ps = _extract_params(r)
-        print(
+        logger.info(
             f"  {i:02d} loss={_to_float(r['val_loss']):.6f} "
             f"seq_len={int(ps['sequence_length'])} lr={ps['learning_rate']:.6g} "
             f"batch={int(ps['batch_size'])} units={int(ps['units'])} "
             f"layers={int(ps['layers'])} dropout={ps['dropout']:.4g}"
         )
 
-    print('\nTop distribution and means:')
+    logger.info('\nTop distribution and means:')
     for k in ['sequence_length', 'learning_rate', 'batch_size', 'units', 'layers', 'dropout']:
         counts, means = _value_stats(top_rows, k)
         _print_distribution(f'- {k}', counts, means)
 
-    print('\nGlobal means by value:')
+    logger.info('\nGlobal means by value:')
     for k in ['sequence_length', 'learning_rate', 'batch_size', 'units', 'layers', 'dropout']:
         _, means = _value_stats(rows, k)
         top_counts, _ = _value_stats(top_rows, k)
         ranked = sorted(means.items(), key=lambda kv: kv[1])
         kept = _top_values(top_counts, frac=args.top_coverage)
         rec = [v for v, _ in ranked if v in kept]
-        print(f"- {k}: recommended={rec}")
+        logger.info(f"- {k}: recommended={rec}")
 
-    print('\nPruning suggestions:')
+    logger.info('\nPruning suggestions:')
     pr = _suggest_prune(rows, top_rows)
     for k, d in pr.items():
-        print(f"- {k}: keep={d['keep']} drop={d['drop']}")
+        logger.info(f"- {k}: keep={d['keep']} drop={d['drop']}")
 
 
 if __name__ == '__main__':

@@ -13,7 +13,7 @@ splitting:
 # Data preprocessing
 preprocessing:
   selected_columns: [close]
-  handle_missing: forward_fill  # forward_fill, drop, interpolate
+  handle_missing: drop  # forward_fill, drop, interpolate
   sort_by_index: true
   outlier_method: detrended_iqr  # 'none', 'iqr', 'zscore', 'detrended_iqr' (preserves trend, removes anomalies)
   outlier_threshold: 1.5  # IQR multiplier (1.5 = standard). Detrended IQR removes anomalies while preserving $100->$4k trend

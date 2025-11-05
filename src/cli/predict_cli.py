@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 import json
+import logging
 import numpy as np
 import pandas as pd
 import torch
@@ -16,18 +17,10 @@ from infrastructure.data.sequence_builder import NumpySequenceBuilder
 from infrastructure.data.outlier_handler import OutlierHandler
 from infrastructure.persistence.model_repository import ModelPackageRepository
 from infrastructure.torch.FactoryPattern_LSTMModelFactory import build_lstm
+from infrastructure.torch.device import get_device
 
 
-def _device():
-    if torch.cuda.is_available():
-        try:
-            torch.backends.cudnn.benchmark = True
-        except Exception:
-            pass
-        return torch.device('cuda')
-    if torch.backends.mps.is_available():
-        return torch.device('mps')
-    return torch.device('cpu')
+logger = logging.getLogger(__name__)
 
 
 def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
@@ -74,11 +67,11 @@ def _resolve_package_dir(path: str) -> str:
     candidates.sort(key=lambda x: x[0], reverse=True)
     if len(candidates) == 1:
         return candidates[0][1]
-    print("\nAvailable model packages:")
+    logger.info("\nAvailable model packages:")
     for i, (_, d, meta) in enumerate(candidates, start=1):
         metrics = meta.get('metrics', {}) if isinstance(meta, dict) else {}
         v = metrics.get('val_loss', 'na')
-        print(f"  [{i}] {os.path.basename(d)}  val_loss={v}")
+        logger.info(f"  [{i}] {os.path.basename(d)}  val_loss={v}")
     while True:
         choice = input(f"Select package [1-{len(candidates)}] (default 1): ").strip()
         if choice == "":
@@ -89,7 +82,7 @@ def _resolve_package_dir(path: str) -> str:
                 return candidates[idx - 1][1]
         except ValueError:
             pass
-        print("Invalid selection. Try again.")
+        logger.warning("Invalid selection. Try again.")
 
 
 def main() -> None:
@@ -97,6 +90,11 @@ def main() -> None:
     p.add_argument('--package-dir', default='./models/', type=str, help='Directory containing model.pt, scaler.pkl, params.json')
     p.add_argument('--verbose', action='store_true', default=True)
     args = p.parse_args()
+
+    logging.basicConfig(
+        level=(logging.INFO if args.verbose else logging.WARNING),
+        format='%(asctime)s %(levelname)s %(name)s - %(message)s',
+    )
 
     lstm_config = ConfigLoader.load_lstm_config(ConfigLoader.get_config_path('lstm_config.yaml'))
     data_config = ConfigLoader.load_data_config(ConfigLoader.get_config_path('data_config.yaml'))
@@ -152,14 +150,14 @@ def main() -> None:
     )
 
     if len(X_test) == 0:
-        print('No test sequences could be built. Check sequence_length and test split size.')
+        logger.error('No test sequences could be built. Check sequence_length and test split size.')
         return
 
     if X_test.ndim == 2:
         X_test = np.expand_dims(X_test, -1)
     X_test_t = torch.tensor(X_test, dtype=torch.float32)
 
-    device = _device()
+    device = get_device()
     model = build_lstm(lstm_config, params, device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -173,18 +171,18 @@ def main() -> None:
 
     report = _metrics(y_true, y_pred)
 
-    print("\n" + "=" * 80)
-    print("PREDICTION REPORT")
-    print("=" * 80)
-    print(f"Model package: {pkg_dir}")
-    print(f"Saved val metrics: {saved_metrics}")
-    print(f"Test samples: {len(y_true)}")
-    print("Metrics:")
-    print(f"  RMSE:      {report['rmse']:.6f}")
-    print(f"  MAE:       {report['mae']:.6f}")
-    print(f"  MSE:       {report['mse']:.6f}")
-    print(f"  MAPE(%):   {report['mape_pct']:.2f}")
-    print(f"  R2:        {report['r2']:.6f}")
+    logger.info("\n" + "=" * 80)
+    logger.info("PREDICTION REPORT")
+    logger.info("=" * 80)
+    logger.info(f"Model package: {pkg_dir}")
+    logger.info(f"Saved val metrics: {saved_metrics}")
+    logger.info(f"Test samples: {len(y_true)}")
+    logger.info("Metrics:")
+    logger.info(f"  RMSE:      {report['rmse']:.6f}")
+    logger.info(f"  MAE:       {report['mae']:.6f}")
+    logger.info(f"  MSE:       {report['mse']:.6f}")
+    logger.info(f"  MAPE(%):   {report['mape_pct']:.2f}")
+    logger.info(f"  R2:        {report['r2']:.6f}")
 
     k = min(10, len(y_true))
     sample_df = pd.DataFrame({
@@ -192,8 +190,8 @@ def main() -> None:
         'predicted': y_pred[:k],
         'error': (y_pred - y_true)[:k],
     })
-    print("\nSample predictions (first {}):".format(k))
-    print(sample_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
+    logger.info("\nSample predictions (first {}):".format(k))
+    logger.info("\n" + sample_df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
 
 
 if __name__ == '__main__':

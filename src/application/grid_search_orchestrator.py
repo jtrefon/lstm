@@ -1,10 +1,13 @@
 """Grid search orchestrator - application use case."""
 import time
+import logging
 from typing import Optional
 
 from domain.models import ParameterSet, SearchSummary
 from domain.services import GridSearchService
 from application.dto import GridSearchRequest, GridSearchResponse
+
+logger = logging.getLogger(__name__)
 
 
 class GridSearchOrchestrator:
@@ -38,7 +41,7 @@ class GridSearchOrchestrator:
             )
 
             if request.verbose:
-                print(
+                logger.info(
                     "Grid permutations: "
                     f"total={total_permutations} "
                     f"completed={completed_before_run} "
@@ -56,7 +59,7 @@ class GridSearchOrchestrator:
                         f"{global_completed}/{progress_denominator} "
                         f"({progress_pct:.1f}%)"
                     )
-                    print(
+                    logger.info(
                         f"[{result.trial_number} | {progress_summary}] "
                         f"seq_len={result.parameters.sequence_length} "
                         f"lr={result.parameters.learning_rate:.6f} "
@@ -72,7 +75,7 @@ class GridSearchOrchestrator:
                     best_loss = result.metrics.val_loss
                     best_params = result.parameters
                     if request.verbose:
-                        print(f"  ✓ New best: loss={best_loss:.6f}")
+                        logger.info(f"  ✓ New best: loss={best_loss:.6f}")
 
             end_time = time.time()
 

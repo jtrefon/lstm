@@ -2,6 +2,7 @@
 import argparse
 import os
 import sys
+import logging
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,12 +21,6 @@ from application.dto import GridSearchRequest
 from application.grid_search_orchestrator import GridSearchOrchestrator
 
 
-def get_config_path(filename: str) -> str:
-    """Get absolute path to config file."""
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(base_dir, 'config', filename)
-
-
 def main():
     """Main entry point for grid search CLI."""
     parser = argparse.ArgumentParser(description='LSTM Hyperparameter Grid Search')
@@ -33,12 +28,18 @@ def main():
     parser.add_argument('--verbose', action='store_true', default=True, help='Verbose output')
     args = parser.parse_args()
 
-    print("Loading configurations...")
-    lstm_config = ConfigLoader.load_lstm_config(get_config_path('lstm_config.yaml'))
-    optimization_config = ConfigLoader.load_optimization_config(get_config_path('optimization_config.yaml'))
-    data_config = ConfigLoader.load_data_config(get_config_path('data_config.yaml'))
+    logging.basicConfig(
+        level=(logging.INFO if args.verbose else logging.WARNING),
+        format='%(asctime)s %(levelname)s %(name)s - %(message)s',
+    )
+    logger = logging.getLogger(__name__)
 
-    print("Initializing data pipeline...")
+    logger.info("Loading configurations...")
+    lstm_config = ConfigLoader.load_lstm_config(ConfigLoader.get_config_path('lstm_config.yaml'))
+    optimization_config = ConfigLoader.load_optimization_config(ConfigLoader.get_config_path('optimization_config.yaml'))
+    data_config = ConfigLoader.load_data_config(ConfigLoader.get_config_path('data_config.yaml'))
+
+    logger.info("Initializing data pipeline...")
     # Data loading (no cap here; grid-search-only cap applied below)
     data_source = CSVDataSource(
         filepath=data_config.data_source.path,
@@ -46,7 +47,7 @@ def main():
     )
     df = data_source.load()
     series = df[data_config.data_source.target_column]
-    print(f"Loaded {len(series)} samples from data source")
+    logger.info(f"Loaded {len(series)} samples from data source")
 
     # Apply grid-search-only data cap (latest samples by default)
     gs_cap = optimization_config.grid_search.data_samples_cap
@@ -54,10 +55,10 @@ def main():
     if gs_cap is not None:
         if gs_cap_from == 'end':
             series = series.iloc[-gs_cap:]
-            print(f"Grid search data cap: using last {gs_cap} samples")
+            logger.info(f"Grid search data cap: using last {gs_cap} samples")
         else:
             series = series.iloc[:gs_cap]
-            print(f"Grid search data cap: using first {gs_cap} samples")
+            logger.info(f"Grid search data cap: using first {gs_cap} samples")
 
     # Data splitting - single source of truth for capping
     base_splitter = TimeSeriesSplitter(
@@ -68,7 +69,7 @@ def main():
     if gs_cap is not None:
         # When grid-search data cap is set, ignore train/val windows to avoid double clipping
         if lstm_config.optimization.train_window is not None or lstm_config.optimization.val_window is not None:
-            print("NOTE: Ignoring train_window/val_window because grid_search.data_samples_cap is set")
+            logger.info("NOTE: Ignoring train_window/val_window because grid_search.data_samples_cap is set")
 
         # Ensure splits can support the maximum sequence length
         n = len(series)
@@ -100,7 +101,7 @@ def main():
         # Slice
         train_series = series.iloc[:tr_len]
         val_series = series.iloc[tr_len:tr_len + va_len]
-        print(f"Grid search split: train={len(train_series)} val={len(val_series)} (max_seq_len={max_seq_len})")
+        logger.info(f"Grid search split: train={len(train_series)} val={len(val_series)} (max_seq_len={max_seq_len})")
     else:
         if (
             lstm_config.optimization.train_window is None
@@ -115,15 +116,15 @@ def main():
             )
             train_series, val_series, _ = splitter.split(series)
 
-    print(f"Train samples: {len(train_series)}, Val samples: {len(val_series)}")
+    logger.info(f"Train samples: {len(train_series)}, Val samples: {len(val_series)}")
 
-    print("Initializing persistence layer...")
+    logger.info("Initializing persistence layer...")
     # Persistence
     state_repo = JSONSearchStateRepository(optimization_config.persistence.state_file)
     results_repo = CSVResultsRepository(optimization_config.persistence.results_file)
     best_params_repo = JSONBestParamsRepository(optimization_config.persistence.best_params_file)
 
-    print("Initializing validator...")
+    logger.info("Initializing validator...")
     # Validator with preprocessing config for outlier handling
     sequence_builder = NumpySequenceBuilder()
     validator = PyTorchLSTMValidator(
@@ -134,7 +135,7 @@ def main():
         preprocessing_config=data_config.preprocessing,
     )
 
-    print("Initializing grid search...")
+    logger.info("Initializing grid search...")
     # Grid search
     grid_generator = ConfigBasedParameterGridGenerator(optimization_config.grid_search)
     service = GridSearchService(
@@ -145,7 +146,7 @@ def main():
         best_params_repo=best_params_repo,
     )
 
-    print("Running grid search...")
+    logger.info("Running grid search...")
     orchestrator = GridSearchOrchestrator(service)
     # Use samples_cap from config, override with CLI arg if provided
     samples_cap = args.max_trials if args.max_trials else optimization_config.grid_search.samples_cap
@@ -156,23 +157,23 @@ def main():
     response = orchestrator.execute(request)
 
     if response.success:
-        print("\n" + "="*80)
-        print("GRID SEARCH COMPLETE")
-        print("="*80)
-        print(f"Total trials: {response.summary.total_trials}")
-        print(f"Duration: {response.summary.duration_seconds:.1f}s")
-        print(f"Throughput: {response.summary.trials_per_second:.2f} trials/sec")
-        print(f"\nBest parameters found:")
-        print(f"  sequence_length: {response.summary.best_parameters.sequence_length}")
-        print(f"  learning_rate: {response.summary.best_parameters.learning_rate}")
-        print(f"  batch_size: {response.summary.best_parameters.batch_size}")
-        print(f"  units: {response.summary.best_parameters.units}")
-        print(f"  layers: {response.summary.best_parameters.layers}")
-        print(f"  dropout: {response.summary.best_parameters.dropout}")
-        print(f"\nBest validation loss: {response.summary.best_loss:.6f}")
-        print("="*80)
+        logger.info("\n" + "="*80)
+        logger.info("GRID SEARCH COMPLETE")
+        logger.info("="*80)
+        logger.info(f"Total trials: {response.summary.total_trials}")
+        logger.info(f"Duration: {response.summary.duration_seconds:.1f}s")
+        logger.info(f"Throughput: {response.summary.trials_per_second:.2f} trials/sec")
+        logger.info(f"\nBest parameters found:")
+        logger.info(f"  sequence_length: {response.summary.best_parameters.sequence_length}")
+        logger.info(f"  learning_rate: {response.summary.best_parameters.learning_rate}")
+        logger.info(f"  batch_size: {response.summary.best_parameters.batch_size}")
+        logger.info(f"  units: {response.summary.best_parameters.units}")
+        logger.info(f"  layers: {response.summary.best_parameters.layers}")
+        logger.info(f"  dropout: {response.summary.best_parameters.dropout}")
+        logger.info(f"\nBest validation loss: {response.summary.best_loss:.6f}")
+        logger.info("="*80)
     else:
-        print(f"Grid search failed: {response.error_message}")
+        logger.error(f"Grid search failed: {response.error_message}")
         sys.exit(1)
 
 

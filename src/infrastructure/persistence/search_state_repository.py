@@ -29,7 +29,23 @@ class JSONSearchStateRepository(SearchStateRepository):
 
         try:
             with open(self.filepath, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+            # Coerce defaults and fix best_loss portability
+            completed = data.get('completed') or []
+            best_params = data.get('best_params') if 'best_params' in data else None
+            raw_best_loss = data.get('best_loss', None)
+            if raw_best_loss in (None, 'null'):
+                best_loss = float('inf')
+            else:
+                try:
+                    best_loss = float(raw_best_loss)
+                except (TypeError, ValueError):
+                    best_loss = float('inf')
+            return {
+                'completed': completed,
+                'best_params': best_params,
+                'best_loss': best_loss,
+            }
         except (json.JSONDecodeError, IOError):
             # Return default state if file is corrupted
             return {
@@ -41,5 +57,22 @@ class JSONSearchStateRepository(SearchStateRepository):
     def save(self, state: Dict[str, Any]) -> None:
         """Save search state to JSON file."""
         self._ensure_directory()
+        payload = dict(state)
+        # Ensure JSON portability: write None instead of Infinity
+        try:
+            bl = payload.get('best_loss', None)
+            if bl is None:
+                pass
+            else:
+                try:
+                    blf = float(bl)
+                except (TypeError, ValueError):
+                    blf = None
+                if blf is None or blf == float('inf'):
+                    payload['best_loss'] = None
+                else:
+                    payload['best_loss'] = blf
+        except Exception:
+            payload['best_loss'] = None
         with open(self.filepath, 'w') as f:
-            json.dump(state, f, indent=2)
+            json.dump(payload, f, indent=2)

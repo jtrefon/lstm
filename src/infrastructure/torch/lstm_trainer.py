@@ -2,12 +2,15 @@
 import time
 from typing import Tuple
 import copy
+import logging
+import random
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.nn.utils import clip_grad_norm_
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -16,22 +19,13 @@ from domain.models import ParameterSet, ValidationMetrics
 from domain.ports import LSTMValidator, SequenceBuilder
 from infrastructure.data.outlier_handler import OutlierHandler
 from infrastructure.torch.FactoryPattern_LSTMModelFactory import build_lstm
+from infrastructure.torch.device import get_device
+
+logger = logging.getLogger(__name__)
 
 
 # Device selection
-if torch.cuda.is_available():
-    DEVICE = torch.device('cuda')
-    print(f"Using device: {DEVICE} ({torch.cuda.get_device_name(0)})")
-    try:
-        torch.backends.cudnn.benchmark = True
-    except Exception:
-        pass
-elif torch.backends.mps.is_available():
-    DEVICE = torch.device('mps')
-    print(f"Using device: {DEVICE}")
-else:
-    DEVICE = torch.device('cpu')
-    print(f"Using device: {DEVICE}")
+DEVICE = get_device()
 
 
 class PyTorchLSTMValidator(LSTMValidator):
@@ -70,6 +64,9 @@ class PyTorchLSTMValidator(LSTMValidator):
         }
         self._seq_stats = {'train_sequences': 0, 'val_sequences': 0}
 
+        # Apply reproducibility settings (seeding/determinism)
+        self._apply_reproducibility()
+
         # Preprocess once per run: sorting, missing handling, outlier handling, scaling
         combined_raw = pd.concat([self.train_series, self.val_series])
         na_before = int(combined_raw.isna().sum())
@@ -99,7 +96,9 @@ class PyTorchLSTMValidator(LSTMValidator):
 
         if self.preprocessing_config and self.preprocessing_config.outlier_method != 'none':
             if self._log_preprocessing:
-                print(f"Outlier handling: detecting anomalies with {self.preprocessing_config.outlier_method}...")
+                logger.info(
+                    f"Outlier handling: detecting anomalies with {self.preprocessing_config.outlier_method}..."
+                )
             values, n_clipped = OutlierHandler.handle_outliers(
                 values,
                 method=self.preprocessing_config.outlier_method,
@@ -107,9 +106,8 @@ class PyTorchLSTMValidator(LSTMValidator):
             )
             self._prep_stats['outliers_clipped'] = int(n_clipped)
             if n_clipped > 0 and self._log_preprocessing:
-                print(
-                    f"  Clipped {n_clipped} points using "
-                    f"{self.preprocessing_config.outlier_method} "
+                logger.info(
+                    f"  Clipped {n_clipped} points using {self.preprocessing_config.outlier_method} "
                     f"(threshold={self.preprocessing_config.outlier_threshold})"
                 )
 
@@ -117,15 +115,47 @@ class PyTorchLSTMValidator(LSTMValidator):
         self._prep_stats['cleaned_len'] = int(len(values))
 
         if self._log_preprocessing:
-            print(f"Scaling {len(values)} samples...")
+            logger.info(f"Scaling {len(values)} samples...")
         scaler = MinMaxScaler()
         scaled_all = scaler.fit_transform(values.reshape(-1, 1))
         if self._log_preprocessing:
-            print(f"Scaling complete.")
+            logger.info("Scaling complete.")
         self._scaler = scaler
         split = len(self.train_series)
         self._train_scaled = scaled_all[:split]
         self._val_scaled = scaled_all[split:]
+
+    def _apply_reproducibility(self) -> None:
+        """Apply reproducibility settings from config (seeding and deterministic mode)."""
+        try:
+            repro = getattr(self.lstm_config, 'reproducibility', None)
+            if repro is None:
+                return
+            seed = repro.seed
+            deterministic = bool(getattr(repro, 'deterministic', False))
+            if seed is not None:
+                random.seed(seed)
+                np.random.seed(seed)
+                torch.manual_seed(seed)
+                try:
+                    torch.cuda.manual_seed_all(seed)
+                except Exception:
+                    pass
+                logger.info(f"Applied reproducibility seed: {seed}")
+            if deterministic:
+                try:
+                    torch.use_deterministic_algorithms(True)
+                except Exception:
+                    pass
+                try:
+                    torch.backends.cudnn.deterministic = True
+                    torch.backends.cudnn.benchmark = False
+                except Exception:
+                    pass
+                logger.info("Deterministic mode enabled (may impact performance)")
+        except Exception:
+            # Never fail initialization due to reproducibility settings
+            logger.exception("Failed to apply reproducibility settings")
 
     def get_preprocessing_stats(self) -> dict:
         return dict(self._prep_stats)
@@ -141,7 +171,9 @@ class PyTorchLSTMValidator(LSTMValidator):
 
             # Build sequences
             if self._log_preprocessing:
-                print(f"Building sequences (seq_len={parameters.sequence_length}, stride={self.lstm_config.model.sequence_stride})...")
+                logger.info(
+                    f"Building sequences (seq_len={parameters.sequence_length}, stride={self.lstm_config.model.sequence_stride})..."
+                )
             X_train, y_train = self.sequence_builder.build(
                 train_scaled,
                 parameters.sequence_length,
@@ -153,11 +185,11 @@ class PyTorchLSTMValidator(LSTMValidator):
                 stride=self.lstm_config.model.sequence_stride,
             )
             if self._log_preprocessing:
-                print(f"Sequences built: train={len(X_train)} val={len(X_val)}")
+                logger.info(f"Sequences built: train={len(X_train)} val={len(X_val)}")
 
             if len(X_train) == 0 or len(X_val) == 0:
                 if self._log_preprocessing:
-                    print(
+                    logger.warning(
                         f"No sequences built: train_len={len(self._train_scaled)}, val_len={len(self._val_scaled)}, "
                         f"seq_len={parameters.sequence_length}, stride={self.lstm_config.model.sequence_stride}"
                     )
@@ -197,8 +229,37 @@ class PyTorchLSTMValidator(LSTMValidator):
             train_dataset = TensorDataset(X_train, y_train)
             val_dataset = TensorDataset(X_val, y_val)
             pin = (DEVICE.type == 'cuda')
-            train_loader = DataLoader(train_dataset, batch_size=parameters.batch_size, shuffle=True, pin_memory=pin)
-            val_loader = DataLoader(val_dataset, batch_size=parameters.batch_size, shuffle=False, pin_memory=pin)
+            # Use seeded generator for determinism if provided
+            generator = None
+            repro = getattr(self.lstm_config, 'reproducibility', None)
+            if repro and repro.seed is not None:
+                try:
+                    generator = torch.Generator(device='cpu')
+                    generator.manual_seed(int(repro.seed))
+                except Exception:
+                    generator = None
+            num_workers = 0
+            try:
+                nw = getattr(self.lstm_config.training, 'num_workers', None)
+                if nw is not None:
+                    num_workers = int(nw)
+            except Exception:
+                num_workers = 0
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=parameters.batch_size,
+                shuffle=True,
+                pin_memory=pin,
+                generator=generator,
+                num_workers=num_workers,
+            )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=parameters.batch_size,
+                shuffle=False,
+                pin_memory=pin,
+                num_workers=num_workers,
+            )
 
             # Create model via factory (DRY, uses input_size from config)
             model = build_lstm(self.lstm_config, parameters, DEVICE)
@@ -222,9 +283,7 @@ class PyTorchLSTMValidator(LSTMValidator):
             return metrics
 
         except Exception as e:
-            import traceback
-            print(f"Validation failed: {e}")
-            traceback.print_exc()
+            logger.exception(f"Validation failed: {e}")
             return ValidationMetrics(
                 val_loss=float('inf'),
                 val_rmse=float('inf'),
@@ -281,6 +340,13 @@ class PyTorchLSTMValidator(LSTMValidator):
                 outputs = model(X_batch)
                 loss = criterion(outputs, y_batch)
                 loss.backward()
+                # Optional gradient clipping
+                gc = getattr(self.lstm_config.training, 'grad_clip_norm', None)
+                if gc is not None:
+                    try:
+                        clip_grad_norm_(model.parameters(), max_norm=float(gc))
+                    except Exception:
+                        pass
                 optimizer.step()
 
                 running_loss += loss.item()
@@ -341,7 +407,7 @@ class PyTorchLSTMValidator(LSTMValidator):
             # Epoch summary logging
             mean_train_loss = float(running_loss / batches_seen) if batches_seen else float('inf')
             if self._log_preprocessing:
-                print(
+                logger.info(
                     f"Epoch {epoch + 1:03d}: train_loss={mean_train_loss:.6f} | "
                     f"val_loss={mean_val_loss:.6f} (rmse={val_rmse:.6f}, mae={val_mae:.6f}) | "
                     f"lr={new_lr:.6f}{' (↓)' if new_lr < prev_lr else ''} | "
