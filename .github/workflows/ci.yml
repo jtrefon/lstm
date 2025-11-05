@@ -25,4 +25,4 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest -q --cov=src --cov-report=term-missing
+          PYTHONPATH=. pytest -q --cov=src --cov-report=term-missing
