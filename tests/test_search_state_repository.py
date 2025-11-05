@@ -20,3 +20,14 @@ def test_search_state_defaults_and_portability(tmp_path: Path):
     # Load should convert None back to inf
     loaded = repo.load()
     assert loaded['best_loss'] == float('inf')
+
+
+def test_search_state_corrupted_file_returns_defaults(tmp_path: Path):
+    p = tmp_path / 'state.json'
+    # Write invalid JSON
+    p.write_text('{ this is not valid json ')
+    repo = JSONSearchStateRepository(str(p))
+    state = repo.load()
+    assert state['completed'] == []
+    assert state['best_params'] is None
+    assert state['best_loss'] == float('inf')
