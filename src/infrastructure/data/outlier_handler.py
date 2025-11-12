@@ -15,14 +15,16 @@ class OutlierHandler:
         method: str = 'none',
         threshold: float = 1.5,
         detrend: bool = False,
+        window: int | None = None,
     ) -> tuple[np.ndarray, int]:
         """
         Handle outliers in data.
 
         Args:
             data: 1D numpy array of values
-            method: 'none' (no handling), 'iqr' (interquartile range), 'zscore', 'detrended_iqr'
-            threshold: IQR multiplier (1.5) or z-score threshold (3.0)
+            method: 'none' (no handling), 'iqr' (interquartile range), 'zscore', 'detrended_iqr', 'rolling_mad'
+            threshold: IQR multiplier (1.5), z-score threshold (3.0), or MAD multiplier (e.g., 5.0)
+            window: rolling window size for 'rolling_mad'
             detrend: If True, remove trend before outlier detection (preserves trend)
 
         Returns:
@@ -39,6 +41,8 @@ class OutlierHandler:
             return OutlierHandler._handle_iqr(data, threshold)
         elif method == 'zscore':
             return OutlierHandler._handle_zscore(data, threshold)
+        elif method == 'rolling_mad':
+            return OutlierHandler._handle_rolling_mad(data, window=window, k=threshold)
         else:
             raise ValueError(f"Unknown outlier method: {method}")
 
@@ -135,6 +139,56 @@ class OutlierHandler:
 
         n_clipped = np.sum(outlier_mask)
         return clipped, int(n_clipped)
+
+    @staticmethod
+    def _handle_rolling_mad(data: np.ndarray, window: int | None = None, k: float = 5.0) -> tuple[np.ndarray, int]:
+        """
+        Handle outliers using a rolling Median Absolute Deviation (MAD) approach.
+
+        Uses rolling median m_t and MAD_t = median(|x_t - m_t|) over a centered window.
+        Clips values outside m_t ± k * 1.4826 * MAD_t. The constant 1.4826 scales MAD to
+        be a consistent estimator for the standard deviation under normality.
+
+        Args:
+            data: 1D numpy array
+            window: rolling window size (required). If None or <3, falls back to global MAD.
+            k: MAD multiplier (e.g., 5.0 is common to avoid over-clipping)
+
+        Returns:
+            (clipped_data, n_clipped)
+        """
+        if window is None or window < 3:
+            # Global MAD fallback
+            s = pd.Series(data)
+            med = float(s.median())
+            mad = float((s - med).abs().median())
+            scale = 1.4826 * mad if mad > 0 else 0.0
+            if scale == 0.0:
+                return data, 0
+            lower = med - k * scale
+            upper = med + k * scale
+            clipped = np.clip(data, lower, upper)
+            n_clipped = int(((data < lower) | (data > upper)).sum())
+            return clipped, n_clipped
+
+        s = pd.Series(data)
+        med = s.rolling(window=window, center=True, min_periods=max(3, window // 4)).median()
+        abs_dev = (s - med).abs()
+        mad = abs_dev.rolling(window=window, center=True, min_periods=max(3, window // 4)).median()
+        # Where MAD is zero or NaN (e.g., flat segments), fallback to global MAD
+        global_med = float(s.median())
+        global_mad = float((s - global_med).abs().median())
+        global_scale = 1.4826 * global_mad if global_mad > 0 else 0.0
+        scale = 1.4826 * mad
+        scale = scale.fillna(global_scale).replace(0.0, global_scale)
+        med_filled = med.fillna(global_med)
+        lower = med_filled - k * scale
+        upper = med_filled + k * scale
+        lower_np = lower.to_numpy()
+        upper_np = upper.to_numpy()
+        clipped = np.clip(data, lower_np, upper_np)
+        n_clipped = int(((data < lower_np) | (data > upper_np)).sum())
+        return clipped, n_clipped
 
     @staticmethod
     def get_bounds(

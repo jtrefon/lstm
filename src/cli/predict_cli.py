@@ -89,6 +89,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description='Predict using a saved LSTM model package on the test split')
     p.add_argument('--package-dir', default='./models/', type=str, help='Directory containing model.pt, scaler.pkl, params.json')
     p.add_argument('--verbose', action='store_true', default=True)
+    p.add_argument('--allow-rescale-test', action='store_true', default=False,
+                   help='If test values fall outside training scaler bounds, allow refitting a temporary scaler on test to map into [0,1].')
     args = p.parse_args()
 
     logging.basicConfig(
@@ -134,13 +136,63 @@ def main() -> None:
             values,
             method=data_config.preprocessing.outlier_method,
             threshold=data_config.preprocessing.outlier_threshold,
+            window=getattr(data_config.preprocessing, 'outlier_window', None),
         )
 
     pkg_dir = _resolve_package_dir(args.package_dir)
     pkg_repo = ModelPackageRepository()
-    state_dict, scaler, params, saved_metrics = pkg_repo.load_package(pkg_dir)
+    state_dict, train_scaler, params, saved_metrics = pkg_repo.load_package(pkg_dir)
 
-    scaled = scaler.transform(values.reshape(-1, 1)).reshape(-1)
+    # Scale test values with training scaler
+    scaled = train_scaler.transform(values.reshape(-1, 1)).reshape(-1)
+    using_test_scaler = False
+    # Diagnostics: handle MinMax vs Standard/Robust differently
+    from sklearn.preprocessing import MinMaxScaler as _MMS, StandardScaler as _SS, RobustScaler as _RS
+    if isinstance(train_scaler, _MMS):
+        try:
+            data_min = float(getattr(train_scaler, 'data_min_', [float('nan')])[0])
+            data_max = float(getattr(train_scaler, 'data_max_', [float('nan')])[0])
+        except Exception:
+            data_min = float('nan')
+            data_max = float('nan')
+        below = int((scaled < 0.0).sum())
+        above = int((scaled > 1.0).sum())
+        total = int(scaled.shape[0])
+        ood_ratio = (below + above) / max(1, total)
+        if below or above:
+            logger.warning(
+                f"Test data outside training MinMax bounds: below=~{below}/{total}, above=~{above}/{total}; "
+                f"training_min={data_min:.6f}, training_max={data_max:.6f}."
+            )
+            if args.allow_rescale_test:
+                test_scaler = _MMS(feature_range=getattr(train_scaler, 'feature_range', (0,1)))
+                test_scaler.fit(values.reshape(-1,1))
+                scaled = test_scaler.transform(values.reshape(-1,1)).reshape(-1)
+                using_test_scaler = True
+                logger.info("Using temporary MinMaxScaler fitted on test to map into [0,1] (allow-rescale-test enabled).")
+            elif ood_ratio > 0.2:
+                logger.warning(
+                    "More than 20% of test samples are outside training scaler bounds. "
+                    "Predictions may degrade. Consider retraining to extend scaler bounds, "
+                    "or rerun with --allow-rescale-test."
+                )
+    else:
+        # Standard or Robust: report z-score exceedance; no rescale option
+        try:
+            mean = float(getattr(train_scaler, 'mean_', [0.0])[0])
+            scale = float(getattr(train_scaler, 'scale_', [1.0])[0])
+            if scale == 0:
+                scale = 1.0
+            z = (values - mean) / scale
+            total = int(z.shape[0])
+            gt3 = int((np.abs(z) > 3.0).sum())
+            gt5 = int((np.abs(z) > 5.0).sum())
+            if gt3 or gt5:
+                logger.warning(
+                    f"Standardized test z-score exceedance: |z|>3: ~{gt3}/{total}, |z|>5: ~{gt5}/{total}."
+                )
+        except Exception:
+            pass
 
     builder = NumpySequenceBuilder()
     X_test, y_test = builder.build(
@@ -165,9 +217,23 @@ def main() -> None:
     with torch.no_grad():
         preds = model(X_test_t.to(device)).squeeze(-1).cpu().numpy()
 
+    # If model was trained to predict deltas, convert predictions to absolute scaled values
+    target_mode = str(getattr(lstm_config.model, 'target_mode', 'value')).lower()
+    if target_mode == 'delta':
+        try:
+            base = X_test[:, -1, 0] if X_test.ndim == 3 else X_test[:, -1]
+            preds = preds + base
+        except Exception:
+            pass
+
+
     # Inverse scale back to original units
-    y_true = scaler.inverse_transform(y_test.reshape(-1, 1)).reshape(-1)
-    y_pred = scaler.inverse_transform(preds.reshape(-1, 1)).reshape(-1)
+    if using_test_scaler:
+        y_true = test_scaler.inverse_transform(y_test.reshape(-1, 1)).reshape(-1)
+        y_pred = test_scaler.inverse_transform(preds.reshape(-1, 1)).reshape(-1)
+    else:
+        y_true = train_scaler.inverse_transform(y_test.reshape(-1, 1)).reshape(-1)
+        y_pred = train_scaler.inverse_transform(preds.reshape(-1, 1)).reshape(-1)
 
     report = _metrics(y_true, y_pred)
 

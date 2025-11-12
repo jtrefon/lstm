@@ -67,7 +67,7 @@ class GridSearchOrchestrator:
                         f"units={result.parameters.units} "
                         f"layers={result.parameters.layers} "
                         f"dropout={result.parameters.dropout:.2f} "
-                        f"→ loss={result.metrics.val_loss:.6f} "
+                        f"→ loss={result.metrics.val_loss:.10g} "
                         f"({result.metrics.duration_seconds:.1f}s)"
                     )
 
@@ -75,7 +75,7 @@ class GridSearchOrchestrator:
                     best_loss = result.metrics.val_loss
                     best_params = result.parameters
                     if request.verbose:
-                        logger.info(f"  ✓ New best: loss={best_loss:.6f}")
+                        logger.info(f"  ✓ New best: loss={best_loss:.10g}")
 
             end_time = time.time()
 

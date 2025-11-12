@@ -170,7 +170,7 @@ def main():
         logger.info(f"  units: {response.summary.best_parameters.units}")
         logger.info(f"  layers: {response.summary.best_parameters.layers}")
         logger.info(f"  dropout: {response.summary.best_parameters.dropout}")
-        logger.info(f"\nBest validation loss: {response.summary.best_loss:.6f}")
+        logger.info(f"\nBest validation loss: {response.summary.best_loss:.10g}")
         logger.info("="*80)
     else:
         logger.error(f"Grid search failed: {response.error_message}")

@@ -11,6 +11,7 @@ class LSTMModelConfig:
     """LSTM model architecture configuration."""
     input_size: int
     sequence_stride: int
+    target_mode: str = 'value'  # 'value' or 'delta'
 
 
 @dataclass(frozen=True)
@@ -139,8 +140,13 @@ class PreprocessingConfig:
     selected_columns: List[str]
     handle_missing: str  # 'forward_fill', 'drop', 'interpolate'
     sort_by_index: bool
-    outlier_method: str  # 'none', 'iqr', 'zscore', 'detrended_iqr'
+    outlier_method: str  # 'none', 'iqr', 'zscore', 'detrended_iqr', 'rolling_mad'
     outlier_threshold: float  # IQR multiplier (1.5) or z-score threshold (3.0)
+    # Scaler strategy for model inputs: 'standard', 'minmax', or 'robust'
+    scaler: str = 'standard'
+    # Optional margin to extend MinMax bounds, expressed as fraction (e.g., 0.1 = 10%)
+    minmax_margin_pct: float = 0.0
+    outlier_window: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +171,7 @@ class ConfigLoader:
         model = LSTMModelConfig(
             input_size=int(m['input_size']),
             sequence_stride=int(m['sequence_stride']),
+            target_mode=str(m.get('target_mode', 'value')).lower(),
         )
 
         # Training config (ensure ints/floats) - fail fast if missing
@@ -312,6 +319,9 @@ class ConfigLoader:
             sort_by_index=bool(pp['sort_by_index']),
             outlier_method=str(pp['outlier_method']),
             outlier_threshold=float(pp['outlier_threshold']),
+            scaler=str(pp.get('scaler', 'standard')),
+            minmax_margin_pct=float(pp.get('minmax_margin_pct', 0.0)),
+            outlier_window=(None if pp.get('outlier_window', None) in (None, 'null') else int(pp.get('outlier_window'))),
         )
 
         return DataConfig(

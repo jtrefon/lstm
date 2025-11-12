@@ -133,7 +133,7 @@ def main() -> None:
     series = df[data_config.data_source.target_column]
     logger.info(f"Loaded {len(series)} samples from data source")
 
-    # Splitting: use full dataset with train/val ratios (optimization windows are for grid search only)
+    # Splitting: use data_config.splitting only (no optimization windows for single training)
     splitter = TimeSeriesSplitter(
         train_ratio=data_config.splitting.train_ratio,
         validation_ratio=data_config.splitting.validation_ratio,
@@ -159,6 +159,11 @@ def main() -> None:
 
     # Train
     metrics = validator.validate(params)
+    metrics_orig = {}
+    try:
+        metrics_orig = validator.get_last_val_metrics_orig()
+    except Exception:
+        metrics_orig = {}
 
     # Save artifacts
     model = validator.get_last_model()
@@ -169,16 +174,23 @@ def main() -> None:
         if base_dir is None:
             base_dir = os.path.dirname(os.path.abspath(optimization_config.persistence.best_params_file))
         pkg_repo = ModelPackageRepository()
+        # Merge scaled and original-unit metrics (if present)
+        m = {
+            'val_loss': float(metrics.val_loss),
+            'val_rmse': float(metrics.val_rmse),
+            'val_mae': float(metrics.val_mae),
+        }
+        try:
+            if metrics_orig:
+                m.update(metrics_orig)
+        except Exception:
+            pass
         saved_package_dir = pkg_repo.save_package(
             base_dir=base_dir,
             state_dict=model.state_dict(),
             scaler=scaler,
             params=params,
-            metrics={
-                'val_loss': float(metrics.val_loss),
-                'val_rmse': float(metrics.val_rmse),
-                'val_mae': float(metrics.val_mae),
-            },
+            metrics=m,
         )
 
     # Optionally also write direct files if user asked
@@ -218,9 +230,21 @@ def main() -> None:
     logger.info(f"  train_sequences: {seqs.get('train_sequences', 0)}")
     logger.info(f"  val_sequences:   {seqs.get('val_sequences', 0)}")
     logger.info("Validation metrics:")
-    logger.info(f"  val_loss:       {metrics.val_loss:.6f}")
-    logger.info(f"  val_rmse:       {metrics.val_rmse:.6f}")
-    logger.info(f"  val_mae:        {metrics.val_mae:.6f}")
+    logger.info(f"  val_loss:       {metrics.val_loss:.10g}")
+    logger.info(f"  val_rmse:       {metrics.val_rmse:.10g}")
+    logger.info(f"  val_mae:        {metrics.val_mae:.10g}")
+    if metrics_orig:
+        try:
+            vr = metrics_orig.get('val_rmse_orig', None)
+            va = metrics_orig.get('val_mae_orig', None)
+            if vr is not None or va is not None:
+                logger.info("Validation metrics (original units):")
+                if vr is not None:
+                    logger.info(f"  val_rmse_orig:  {vr:.6f}")
+                if va is not None:
+                    logger.info(f"  val_mae_orig:   {va:.6f}")
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

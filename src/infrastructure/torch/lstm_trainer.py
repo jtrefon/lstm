@@ -4,6 +4,7 @@ from typing import Tuple
 import copy
 import logging
 import random
+import sys
 
 import numpy as np
 import pandas as pd
@@ -11,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from config.config_loader import LSTMConfig, TrainingConfig, LearningRateSchedulerConfig, PreprocessingConfig
@@ -57,6 +58,7 @@ class PyTorchLSTMValidator(LSTMValidator):
         self._log_preprocessing = log_preprocessing
         self._last_model = None
         self._scaler = None
+        self._last_val_metrics_orig = {}
         self._prep_stats = {
             'raw_len': int(len(self.train_series) + len(self.val_series)),
             'na_removed': 0,
@@ -103,6 +105,7 @@ class PyTorchLSTMValidator(LSTMValidator):
                 values,
                 method=self.preprocessing_config.outlier_method,
                 threshold=self.preprocessing_config.outlier_threshold,
+                window=getattr(self.preprocessing_config, 'outlier_window', None),
             )
             self._prep_stats['outliers_clipped'] = int(n_clipped)
             if n_clipped > 0 and self._log_preprocessing:
@@ -116,8 +119,50 @@ class PyTorchLSTMValidator(LSTMValidator):
 
         if self._log_preprocessing:
             logger.info(f"Scaling {len(values)} samples...")
-        scaler = MinMaxScaler()
-        scaled_all = scaler.fit_transform(values.reshape(-1, 1))
+
+        # Select scaler based on config (default: standard)
+        scaler_kind = 'standard'
+        margin_pct = 0.0
+        try:
+            if self.preprocessing_config is not None:
+                scaler_kind = str(getattr(self.preprocessing_config, 'scaler', 'standard')).lower()
+                margin_pct = float(getattr(self.preprocessing_config, 'minmax_margin_pct', 0.0) or 0.0)
+        except Exception:
+            scaler_kind = 'standard'
+            margin_pct = 0.0
+
+        if scaler_kind == 'minmax':
+            scaler = MinMaxScaler()
+            scaled_all = scaler.fit_transform(values.reshape(-1, 1))
+            # Optionally extend bounds by margin to reduce OOD at inference
+            if margin_pct > 0.0:
+                try:
+                    fr_min, fr_max = scaler.feature_range
+                except Exception:
+                    fr_min, fr_max = (0.0, 1.0)
+                vmin = float(scaler.data_min_[0])
+                vmax = float(scaler.data_max_[0])
+                span = vmax - vmin if vmax > vmin else 1.0
+                vmin2 = vmin - margin_pct * span
+                vmax2 = vmax + margin_pct * span
+                data_range = vmax2 - vmin2
+                scale = (fr_max - fr_min) / data_range
+                min_shift = fr_min - vmin2 * scale
+                scaler.data_min_ = np.array([vmin2], dtype=float)
+                scaler.data_max_ = np.array([vmax2], dtype=float)
+                scaler.data_range_ = np.array([data_range], dtype=float)
+                scaler.scale_ = np.array([scale], dtype=float)
+                scaler.min_ = np.array([min_shift], dtype=float)
+                if self._log_preprocessing:
+                    logger.info(
+                        f"MinMaxScaler with margin: {margin_pct:.2%} → bounds=({vmin2:.6f}, {vmax2:.6f})"
+                    )
+        elif scaler_kind == 'robust':
+            scaler = RobustScaler()
+            scaled_all = scaler.fit_transform(values.reshape(-1, 1))
+        else:
+            scaler = StandardScaler()
+            scaled_all = scaler.fit_transform(values.reshape(-1, 1))
         if self._log_preprocessing:
             logger.info("Scaling complete.")
         self._scaler = scaler
@@ -209,6 +254,20 @@ class PyTorchLSTMValidator(LSTMValidator):
             except Exception:
                 self._seq_stats = {'train_sequences': 0, 'val_sequences': 0}
 
+            # Optional target: delta of last step
+            target_is_delta = False
+            try:
+                target_is_delta = str(getattr(self.lstm_config.model, 'target_mode', 'value')).lower() == 'delta'
+            except Exception:
+                target_is_delta = False
+
+            if target_is_delta:
+                try:
+                    y_train = (y_train - X_train[:, -1]).astype(np.float32)
+                    y_val = (y_val - X_val[:, -1]).astype(np.float32)
+                except Exception:
+                    pass
+
             # Ensure correct shapes: (batch, seq_len, 1) for inputs, (batch, 1) for targets
             if X_train.ndim == 2:
                 X_train = np.expand_dims(X_train, -1)
@@ -270,6 +329,7 @@ class PyTorchLSTMValidator(LSTMValidator):
                 train_loader,
                 val_loader,
                 parameters.learning_rate,
+                target_is_delta=target_is_delta,
             )
 
             metrics = ValidationMetrics(
@@ -303,6 +363,7 @@ class PyTorchLSTMValidator(LSTMValidator):
         train_loader: DataLoader,
         val_loader: DataLoader,
         learning_rate: float,
+        target_is_delta: bool = False,
     ) -> dict:
         """Train model and return best validation metrics."""
         criterion = nn.MSELoss()
@@ -332,6 +393,28 @@ class PyTorchLSTMValidator(LSTMValidator):
             # Training phase
             running_loss = 0.0
             batches_seen = 0
+            total_batches = None
+            try:
+                total_batches = len(train_loader)
+            except Exception:
+                total_batches = None
+            sec_interval = 0.0
+            batch_interval = 0
+            try:
+                sec_interval = float(getattr(self.lstm_config.training, 'log_interval_seconds', 0.0) or 0.0)
+            except Exception:
+                sec_interval = 0.0
+            try:
+                batch_interval = int(getattr(self.lstm_config.training, 'log_interval_batches', 0) or 0)
+            except Exception:
+                batch_interval = 0
+            last_log_t = time.time()
+            is_tty = False
+            try:
+                is_tty = sys.stdout.isatty()
+            except Exception:
+                is_tty = False
+            progress_len = 0
 
             for batch_idx, (X_batch, y_batch) in enumerate(train_loader, start=1):
                 X_batch = X_batch.to(DEVICE, non_blocking=train_loader.pin_memory)
@@ -352,6 +435,29 @@ class PyTorchLSTMValidator(LSTMValidator):
                 running_loss += loss.item()
                 batches_seen = batch_idx
 
+                if self._log_preprocessing and (
+                    (batch_interval and (batch_idx % batch_interval == 0)) or
+                    (sec_interval and ((time.time() - last_log_t) >= sec_interval))
+                ):
+                    try:
+                        mean_so_far = float(running_loss / batches_seen) if batches_seen else float('inf')
+                    except Exception:
+                        mean_so_far = float('inf')
+                    if is_tty:
+                        if total_batches:
+                            msg = f"\rEpoch {epoch + 1:03d} [{batch_idx}/{total_batches}] train_loss={mean_so_far:.10g}"
+                        else:
+                            msg = f"\rEpoch {epoch + 1:03d} [batch {batch_idx}] train_loss={mean_so_far:.10g}"
+                        pad = max(0, progress_len - len(msg))
+                        try:
+                            sys.stdout.write(msg + (" " * pad))
+                            sys.stdout.flush()
+                            progress_len = len(msg)
+                        except Exception:
+                            pass
+                    # In non-TTY (e.g., CI) avoid noisy logs; rely on end-of-epoch summary
+                    last_log_t = time.time()
+
                 if self.lstm_config.training.max_batches_per_epoch and batch_idx >= self.lstm_config.training.max_batches_per_epoch:
                     break
 
@@ -359,6 +465,8 @@ class PyTorchLSTMValidator(LSTMValidator):
             model.eval()
             val_losses = []
             val_errors = []
+            val_preds_batches = []
+            val_targets_batches = []
             with torch.no_grad():
                 for v_idx, (X_batch, y_batch) in enumerate(val_loader, start=1):
                     X_batch = X_batch.to(DEVICE, non_blocking=val_loader.pin_memory)
@@ -366,9 +474,17 @@ class PyTorchLSTMValidator(LSTMValidator):
                     outputs = model(X_batch)
                     loss = criterion(outputs, y_batch)
                     val_losses.append(loss.item())
-                    preds = outputs.squeeze(-1).cpu().numpy()
-                    targets = y_batch.squeeze(-1).cpu().numpy()
-                    val_errors.append(preds - targets)
+                    # For metrics, compare absolute predictions in scaled space
+                    if target_is_delta:
+                        last_x = X_batch[:, -1, 0].unsqueeze(-1)  # (B,1)
+                        preds_abs = (outputs + last_x).squeeze(-1).cpu().numpy()
+                        targets_abs = (y_batch + last_x).squeeze(-1).cpu().numpy()
+                    else:
+                        preds_abs = outputs.squeeze(-1).cpu().numpy()
+                        targets_abs = y_batch.squeeze(-1).cpu().numpy()
+                    val_preds_batches.append(np.atleast_1d(preds_abs))
+                    val_targets_batches.append(np.atleast_1d(targets_abs))
+                    val_errors.append(preds_abs - targets_abs)
 
                     if self.lstm_config.training.max_batches_per_epoch and v_idx >= self.lstm_config.training.max_batches_per_epoch:
                         break
@@ -399,6 +515,22 @@ class PyTorchLSTMValidator(LSTMValidator):
                     best_epoch = epoch
                 except Exception:
                     best_state = None
+                # Compute original-unit metrics for the best epoch
+                try:
+                    if self._scaler is not None and val_preds_batches and val_targets_batches:
+                        preds_all = np.concatenate(val_preds_batches).reshape(-1, 1)
+                        targets_all = np.concatenate(val_targets_batches).reshape(-1, 1)
+                        y_pred_orig = self._scaler.inverse_transform(preds_all).reshape(-1)
+                        y_true_orig = self._scaler.inverse_transform(targets_all).reshape(-1)
+                        err = y_pred_orig - y_true_orig
+                        best_val_rmse_orig = float(np.sqrt(np.mean(np.square(err))))
+                        best_val_mae_orig = float(np.mean(np.abs(err)))
+                        self._last_val_metrics_orig = {
+                            'val_rmse_orig': best_val_rmse_orig,
+                            'val_mae_orig': best_val_mae_orig,
+                        }
+                except Exception:
+                    pass
             else:
                 patience_counter += 1
                 if patience_counter >= self.lstm_config.training.early_stop_patience:
@@ -407,9 +539,16 @@ class PyTorchLSTMValidator(LSTMValidator):
             # Epoch summary logging
             mean_train_loss = float(running_loss / batches_seen) if batches_seen else float('inf')
             if self._log_preprocessing:
+                # Terminate any in-place progress line with a newline once per epoch
+                if is_tty:
+                    try:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                    except Exception:
+                        pass
                 logger.info(
-                    f"Epoch {epoch + 1:03d}: train_loss={mean_train_loss:.6f} | "
-                    f"val_loss={mean_val_loss:.6f} (rmse={val_rmse:.6f}, mae={val_mae:.6f}) | "
+                    f"Epoch {epoch + 1:03d}: train_loss={mean_train_loss:.10g} | "
+                    f"val_loss={mean_val_loss:.10g} (rmse={val_rmse:.10g}, mae={val_mae:.10g}) | "
                     f"lr={new_lr:.6f}{' (↓)' if new_lr < prev_lr else ''} | "
                     f"patience={patience_counter}/{self.lstm_config.training.early_stop_patience}"
                 )
@@ -422,11 +561,21 @@ class PyTorchLSTMValidator(LSTMValidator):
             except Exception:
                 pass
 
-        return {
+        result = {
             'val_loss': best_val_loss,
             'val_rmse': best_val_rmse,
             'val_mae': best_val_mae,
         }
+        # Attach original-unit metrics if computed
+        try:
+            if self._last_val_metrics_orig:
+                result.update(self._last_val_metrics_orig)
+        except Exception:
+            pass
+        return result
 
     def get_sequence_stats(self) -> dict:
         return dict(self._seq_stats)
+
+    def get_last_val_metrics_orig(self) -> dict:
+        return dict(self._last_val_metrics_orig)
